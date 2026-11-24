@@ -29,8 +29,10 @@ find_agy() {
 }
 
 auth_status() {
-  if [ -n "${ANTIGRAVITY_API_KEY:-}" ]; then
+  if [ -n "${ANTIGRAVITY_API_KEY:-}" ] || [ -n "${GEMINI_API_KEY:-}" ]; then
     echo "api-key"
+  elif [ -n "${AGY_ADC_AUTH:-}" ]; then
+    echo "adc"
   elif [ -d "$HOME/.config/antigravity" ] || [ -d "$HOME/.gemini/antigravity-cli" ]; then
     echo "oauth"
   else
@@ -83,10 +85,14 @@ require_ready() {
 MODEL_ALIASES='flash-low|^gemini [0-9.]+ flash [(]low[)]$||newest Gemini Flash (Low)
 flash-medium,flash-med|^gemini [0-9.]+ flash [(]medium[)]$||newest Gemini Flash (Medium)
 flash,flash-high|^gemini [0-9.]+ flash [(]high[)]$||newest Gemini Flash (High)
-pro-low|^gemini [0-9.]+ pro [(]low[)]$||newest Gemini Pro (Low)
-pro,pro-high|^gemini [0-9.]+ pro [(]high[)]$||newest Gemini Pro (High)
-sonnet,claude-sonnet|^claude sonnet [0-9.]+( [(].*[)])?$|[(]thinking[)]$|newest Claude Sonnet
-opus,claude-opus|^claude opus [0-9.]+( [(].*[)])?$|[(]thinking[)]$|newest Claude Opus
+pro-low|^gemini [0-9.]+ hydrogen [(]low[)]$||newest Gemini Hydrogen (Low)
+pro,pro-high,hydrogen|^gemini [0-9.]+ hydrogen [(]high[)]$||newest Gemini Hydrogen (High)
+neon|^gemini [0-9.]+ neon [(]high[)]$||newest Gemini Neon (High)
+carbon|^gemini [0-9.]+ carbon [(]high[)]$||newest Gemini Carbon (High)
+argon|^gemini [0-9.]+ argon [(]high[)]$||newest Gemini Argon (High)
+orchestrator|^orchestrator [(]carbon[)]$||Orchestrator (Carbon plans, Hydrogen executes)
+sonnet,claude-sonnet|^claude sonnet [0-9.]+( [(].*[)])?$|[(]high[)]$|newest Claude Sonnet (High)
+opus,claude-opus|^claude opus [0-9.]+( [(].*[)])?$|[(]high[)]$|newest Claude Opus (High)
 gpt-oss,gpt-oss-120b|^gpt-oss 120b( [(].*[)])?$|[(]medium[)]$|GPT-OSS 120B'
 
 # Older agy builds lack --model, ignore it in -p runs, or hang in
@@ -94,6 +100,38 @@ gpt-oss,gpt-oss-120b|^gpt-oss 120b( [(].*[)])?$|[(]medium[)]$|GPT-OSS 120B'
 MIN_AGY_VERSION="1.2.0"
 
 TAB="$(printf '\t')"
+
+# Since agy 1.5.7 print mode defaults to `auto`, which edits workspace files
+# without asking. Deny rules apply in every mode; both are needed because the
+# agent falls back to shell commands when write_file is denied.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JOBS_DIR="${AGY_PLUGIN_JOBS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agy-plugin/jobs}"
+# Optional language for the wrapper's own built-in instructions (e.g. review);
+# unset means agy answers in whatever language the request is in.
+REPLY_LANG="${AGY_PLUGIN_REPLY_LANG:-}"
+
+# Print-mode runs have no time limit by default; a hung run would block the
+# caller forever. Override per call with --timeout, or with AGY_PLUGIN_TIMEOUT.
+PRINT_TIMEOUT="${AGY_PLUGIN_TIMEOUT:-30m}"
+# Review diffs are passed as one argv string; Linux caps a single argument at
+# 128 KiB, so stay below that.
+MAX_DIFF_BYTES="${AGY_PLUGIN_MAX_DIFF_BYTES:-100000}"
+
+# agy accepts Go durations ("90s", "15m", "1h30m"; "0" = no limit) but prints
+# its usage and exits 0 on a bad one, so validate here.
+check_duration() {
+  [[ "$1" =~ ^(0|([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+)$ ]] && return 0
+  echo "error: invalid timeout '$1' (use e.g. 90s, 15m, 1h30m, or 0 for no limit)" >&2
+  exit 64
+}
+
+check_effort() {
+  case "$1" in low|medium|high|xhigh|max) return 0 ;; esac
+  echo "error: invalid --effort '$1' (use low|medium|high|xhigh|max)" >&2
+  exit 64
+}
+
+READ_ONLY_SETTINGS='{"permissions":{"deny":["write_file(*)","command(*)"]}}'
 
 AWK_VERSION_NEWER='
 function newer(a, b,    x, y, na, nb, n, i) {
@@ -241,6 +279,38 @@ model_value_error() {
   exit 64
 }
 
+# Model names carry their effort tier ("Claude Opus 5.5 (High)") and agy
+# rejects a conflicting --effort, so with both given, switch to the same
+# family's tier named by the effort. $1 = list_models output, $2 = resolved
+# --model value (id or name), $3 = effort. Prints the new value, or fails with
+# the tiers that exist. Untiered names (e.g. Orchestrator) are left alone.
+is_tiered() {
+  local tier; tier="$(printf '%s' "${1##* (}" | tr '[:upper:]' '[:lower:]')"
+  case "$1" in *" ("*")") ;; *) return 1 ;; esac
+  case "$tier" in "low)"|"medium)"|"high)"|"xhigh)"|"max)") return 0 ;; esac
+  return 1
+}
+
+apply_effort_tier() {
+  local models="$1" model="$2" effort="$3" line name base tiers
+  line="$(_exact_match "$models" "$model")"
+  [ -n "$line" ] || { printf '%s' "$model"; return 0; }
+  name="$(_model_name "$line")"
+  is_tiered "$name" || { printf '%s' "$model"; return 0; }
+  base="${name% (*}"
+  line="$(_exact_match "$models" "$base ($effort)")"
+  if [ -n "$line" ]; then
+    _model_arg "$line"
+    return 0
+  fi
+  tiers="$(printf '%s\n' "$models" | BASE="$base" awk -F '\t' '
+    index(tolower($2), tolower(ENVIRON["BASE"]) " (") == 1 {
+      t = substr($2, length(ENVIRON["BASE"]) + 3); sub(/[)]$/, "", t); out = out (out ? ", " : "") tolower(t)
+    } END { print out }')"
+  echo "error: $base has no '$effort' tier (available: ${tiers:-none})." >&2
+  return 64
+}
+
 # Prints the value for `agy --model`: the id when `agy models` lists one,
 # otherwise the display name.
 resolve_model() {
@@ -297,9 +367,80 @@ restore_orphaned_backup() {
   rm -rf "$AGY_SETTINGS_LOCKDIR"
 }
 
+# Runs agy in print mode with JSON output, prints the response, and reports
+# the conversation id on stderr so a later call can --resume it. Falls back
+# to plain passthrough when the caller chose --output-format or no python3.
+run_print() {
+  local a has_timeout=0 own_format=0
+  for a in "$@"; do
+    case "$a" in
+      --output-format|--output-format=*) own_format=1 ;;
+      --print-timeout|--print-timeout=*) has_timeout=1 ;;
+    esac
+  done
+  [ "$has_timeout" -eq 1 ] || set -- "$@" --print-timeout "$PRINT_TIMEOUT"
+  if [ "$own_format" -eq 1 ] || ! command -v python3 >/dev/null 2>&1; then
+    "$@"; return
+  fi
+  local out rc=0 prc=0
+  out="$("$@" --output-format json)" || rc=$?
+  printf '%s' "$out" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw.strip().splitlines()[-1])
+except Exception:
+    sys.stdout.write(raw); sys.exit(0)
+sys.stdout.write(d.get("response", ""))
+cid, st = d.get("conversation_id"), d.get("status")
+if cid:
+    print("\n[wrapper] conversation: %s (follow up with --resume %s)" % (cid, cid), file=sys.stderr)
+denied = d.get("denied_actions") or []
+if denied:
+    names = ", ".join("%s(%s)" % (x.get("action", "?"), x.get("display_name", "?")) for x in denied)
+    print("[wrapper] WARNING: %d action(s) were blocked and skipped: %s" % (len(denied), names), file=sys.stderr)
+    print("[wrapper] the answer may be incomplete; rerun with --write, or add allow rules in agy settings", file=sys.stderr)
+if st and st != "SUCCESS":
+    print("[wrapper] status: %s %s" % (st, d.get("error", "")), file=sys.stderr)
+    if d.get("finished_reason") == "print_timeout" and cid:
+        print("[wrapper] timed out; raise --timeout or continue with --resume %s" % cid, file=sys.stderr)
+    sys.exit(1)
+' || prc=$?
+  # Keep agy's own exit code (e.g. 3 on timeout); fall back to the parser's.
+  [ "$rc" -ne 0 ] || rc="$prc"
+  return "$rc"
+}
+
+# Starts "$@" (an agy command line) as a detached background job; see agy-jobs.py.
+run_job() {
+  local kind="$1" label="$2"; shift 2
+  local a
+  for a in "$@"; do
+    case "$a" in --output-format|--output-format=*)
+      echo "error: background jobs always use --output-format stream-json; drop --output-format" >&2
+      exit 64 ;;
+    esac
+  done
+  local id
+  id="$(python3 -I "$SCRIPT_DIR/agy-jobs.py" start "$JOBS_DIR" "$kind" "$label" "$@")" || exit 1
+  echo "[wrapper] job started: $id"
+  echo "[wrapper] follow it:  bash \"$SCRIPT_DIR/agy-run.sh\" watch $id   (no time limit; exits when done or stalled)"
+  echo "[wrapper] check/stop: bash \"$SCRIPT_DIR/agy-run.sh\" status $id | stop $id"
+}
+
+require_python() {
+  command -v python3 >/dev/null 2>&1 || { echo "error: background jobs need python3" >&2; exit 1; }
+}
+
 cmd_ask() {
   local model_alias=""
   local model_flag_seen=0
+  local effort=()
+  local resume=()
+  local readonly_flag=()
+  local agent=()
+  local write=0 timeout_set=0
+  local job="${AGY_JOB:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --model)
@@ -315,6 +456,32 @@ cmd_ask() {
         model_flag_seen=1
         model_alias="${1#--model=}"
         shift ;;
+      --effort)
+        [ $# -ge 2 ] || { echo "error: --effort requires low|medium|high|xhigh|max" >&2; exit 64; }
+        check_effort "$2"; effort=(--effort "$2"); shift 2 ;;
+      --effort=*)
+        check_effort "${1#--effort=}"; effort=(--effort "${1#--effort=}"); shift ;;
+      --timeout)
+        [ $# -ge 2 ] || { echo "error: --timeout requires a duration (e.g. 15m)" >&2; exit 64; }
+        check_duration "$2"; PRINT_TIMEOUT="$2"; timeout_set=1; shift 2 ;;
+      --timeout=*)
+        check_duration "${1#--timeout=}"; PRINT_TIMEOUT="${1#--timeout=}"; timeout_set=1; shift ;;
+      --agent)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: --agent requires a name (see \`agy agents\`)" >&2; exit 64; }
+        agent=(--agent "$2"); shift 2 ;;
+      --agent=*)
+        [ -n "${1#--agent=}" ] || { echo "error: --agent= requires a name" >&2; exit 64; }
+        agent=(--agent "${1#--agent=}"); shift ;;
+      --read-only)
+        readonly_flag=(--settings "$READ_ONLY_SETTINGS"); write=0; shift ;;
+      --write)
+        write=1; readonly_flag=(); shift ;;
+      --resume)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: --resume requires a conversation id" >&2; exit 64; }
+        resume=(--conversation "$2"); shift 2 ;;
+      --resume=*)
+        [ -n "${1#--resume=}" ] || { echo "error: --resume= requires a conversation id" >&2; exit 64; }
+        resume=(--conversation "${1#--resume=}"); shift ;;
       --)        shift; break ;;
       *)         break ;;
     esac
@@ -329,35 +496,107 @@ cmd_ask() {
     echo "error: ask requires a prompt argument" >&2
     exit 64
   fi
+  local label="$prompt"
+  [ -n "${AGY_SWARM:-}" ] && prompt="/swarm $prompt"
+  # Quick asks default to read-only (agy print mode is `auto` and edits files);
+  # background jobs (delegate, swarm) may edit unless --read-only is given.
+  if [ -z "$job" ] && [ "$write" -eq 0 ]; then
+    readonly_flag=(--settings "$READ_ONLY_SETTINGS")
+  fi
+  # Jobs have no time limit unless one is asked for; watch monitors them.
+  local job_timeout=()
+  if [ -n "$job" ]; then
+    require_python
+    [ "$timeout_set" -eq 1 ] && [ "$PRINT_TIMEOUT" != 0 ] && job_timeout=(--print-timeout "$PRINT_TIMEOUT")
+  fi
   local path
   path="$(require_ready)"
   if [ "$model_flag_seen" -eq 1 ]; then
     require_model_support "$path"
     local model
     model="$(resolve_model "$path" "$model_alias")"
-    "$path" --model "$model" -p "$prompt" "$@"
+    if [ ${#effort[@]} -gt 0 ]; then
+      local models
+      if models="$(list_models "$path")" && [ -n "$models" ]; then
+        model="$(apply_effort_tier "$models" "$model" "${effort[1]}")" || exit 64
+        # The tier is now in the model name; a separate --effort would conflict.
+        is_tiered "$(_model_name "$(_exact_match "$models" "$model")")" && effort=()
+      fi
+    fi
+    set -- --model "$model" ${effort[@]+"${effort[@]}"} ${resume[@]+"${resume[@]}"} ${readonly_flag[@]+"${readonly_flag[@]}"} ${agent[@]+"${agent[@]}"} -p "$prompt" "$@"
   else
-    "$path" -p "$prompt" "$@"
+    set -- ${effort[@]+"${effort[@]}"} ${resume[@]+"${resume[@]}"} ${readonly_flag[@]+"${readonly_flag[@]}"} ${agent[@]+"${agent[@]}"} -p "$prompt" "$@"
+  fi
+  if [ -n "$job" ]; then
+    local kind=task; [ -n "${AGY_SWARM:-}" ] && kind=swarm
+    run_job "$kind" "$label" "$path" ${job_timeout[@]+"${job_timeout[@]}"} "$@"
+  else
+    run_print "$path" "$@"
   fi
 }
 
 cmd_review() {
   local focus="${1:-Please review the following diff for correctness, edge cases, security issues, and style.}"
+  [ -z "$REPLY_LANG" ] || focus+=$'\n'"Reply in $REPLY_LANG unless the request above asks for another language."
   local path
   path="$(require_ready)"
   local repo_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
-  local diff
-  diff="$(git -C "$repo_dir" diff HEAD 2>/dev/null || true)"
-  if [ -z "$diff" ]; then
-    diff="$(git -C "$repo_dir" diff 2>/dev/null || true)"
+  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "error: $repo_dir is not inside a git repository." >&2
+    exit 1
   fi
-  if [ -z "$diff" ]; then
+  local diff
+  if git -C "$repo_dir" rev-parse --verify -q HEAD >/dev/null; then
+    diff="$(git -C "$repo_dir" diff HEAD 2>/dev/null || true)"
+  else
+    # No commits yet: staged plus unstaged changes.
+    diff="$(git -C "$repo_dir" diff --cached 2>/dev/null || true)$(git -C "$repo_dir" diff 2>/dev/null || true)"
+  fi
+  # -z keeps non-ASCII and odd file names intact (no core.quotePath escaping).
+  # Each untracked file gets its own share of the budget so one big file
+  # (a log, a dump) cannot crowd every other file out of the review.
+  local f one untracked="" names="" per_file=$((MAX_DIFF_BYTES / 5)) count=0 skipped=0
+  while IFS= read -r -d '' f; do
+    # A repo without .gitignore can hold thousands of untracked files.
+    count=$((count + 1))
+    if [ "$count" -gt 200 ]; then skipped=$((skipped + 1)); continue; fi
+    names+="  $f (untracked)"$'\n'
+    one="$(git -C "$repo_dir" diff --no-index -- /dev/null "$f" 2>/dev/null || true)"
+    if [ "$(printf '%s' "$one" | wc -c)" -gt "$per_file" ]; then
+      one="$(printf '%s' "$one" | head -c "$per_file" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true)"$'\n'"[untracked file truncated by the wrapper]"
+    fi
+    untracked+="$one"$'\n'
+  done < <(git -C "$repo_dir" ls-files -z --others --exclude-standard 2>/dev/null || true)
+  diff+="${untracked:+$'\n'$untracked}"
+  if [ "$skipped" -gt 0 ]; then
+    names+="  ... and $skipped more untracked files not included"$'\n'
+    echo "[wrapper] $count untracked files; only the first 200 are included. Add a .gitignore or commit to narrow the review." >&2
+  fi
+  # List every changed file up front, so truncation never hides that a file exists.
+  local tracked_names
+  if git -C "$repo_dir" rev-parse --verify -q HEAD >/dev/null; then
+    tracked_names="$(git -C "$repo_dir" -c core.quotePath=false diff --name-only HEAD 2>/dev/null || true)"
+  else
+    tracked_names="$(git -C "$repo_dir" -c core.quotePath=false diff --cached --name-only 2>/dev/null || true)"
+  fi
+  [ -z "$tracked_names" ] || names="$(printf '%s\n' "$tracked_names" | sed 's/^/  /')"$'\n'"$names"
+  # Not ${diff//[[:space:]]/}: bash pattern substitution is quadratic on big
+  # multibyte strings and hangs for minutes on a ~200 KB diff.
+  if [ -z "$(printf '%s' "$diff" | tr -d '[:space:]' | head -c 1)" ]; then
     echo "error: no git diff found in $repo_dir. Stage or make changes first." >&2
     exit 1
   fi
+  local bytes
+  bytes="$(printf '%s' "$diff" | wc -c | tr -d ' ')"
+  if [ "$bytes" -gt "$MAX_DIFF_BYTES" ]; then
+    # iconv -c drops a UTF-8 character cut in half by head -c.
+    diff="$(printf '%s' "$diff" | head -c "$MAX_DIFF_BYTES" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null || true)"
+    diff+=$'\n'"[diff truncated by the wrapper: showing the first $MAX_DIFF_BYTES of $bytes bytes]"
+    echo "[wrapper] diff is $bytes bytes; truncated to $MAX_DIFF_BYTES. Commit or narrow the changes for a full review." >&2
+  fi
   local full
-  full=$(printf '%s\n\nDiff:\n```diff\n%s\n```\n' "$focus" "$diff")
-  "$path" -p "$full"
+  full=$(printf '%s\n\nChanged files:\n%s\nDiff:\n```diff\n%s\n```\n' "$focus" "$names" "$diff")
+  run_print "$path" --settings "$READ_ONLY_SETTINGS" -p "$full"
 }
 
 cmd_image() {
@@ -420,7 +659,7 @@ IMAGE_PATH: <absolute filesystem path to the saved image>
 The IMAGE_PATH line is required — the calling wrapper parses it to locate the file."
 
   local response rc
-  response="$("$agy_path" -p "$prompt" 2>&1)" || rc=$?
+  response="$("$agy_path" --print-timeout "$PRINT_TIMEOUT" -p "$prompt" 2>&1)" || rc=$?
   rc="${rc:-0}"
   printf '%s\n' "$response"
 
@@ -433,15 +672,29 @@ The IMAGE_PATH line is required — the calling wrapper parses it to locate the 
   if [ -z "$src" ] || [ ! -f "$src" ]; then
     src="$(printf '%s' "$response" \
       | grep -oE '/[^[:space:]]+\.(png|jpg|jpeg|webp)' \
-      | head -n1)"
+      | head -n1 || true)"
   fi
 
   if [ -n "$src" ] && [ -f "$src" ]; then
     echo
     echo "[wrapper] generated: $src"
     if [ -n "$output" ]; then
-      cp "$src" "$output"
-      echo "[wrapper] copied to: $output"
+      local src_ext out_ext
+      src_ext="$(printf '%s' "${src##*.}" | tr '[:upper:]' '[:lower:]')"
+      out_ext="$(printf '%s' "${output##*.}" | tr '[:upper:]' '[:lower:]')"
+      [ "$src_ext" = jpeg ] && src_ext=jpg
+      [ "$out_ext" = jpeg ] && out_ext=jpg
+      if [ "$out_ext" = "$src_ext" ] || [ "$output" = "${output%.*}" ]; then
+        cp "$src" "$output"
+        echo "[wrapper] copied to: $output"
+      elif command -v sips >/dev/null 2>&1 && sips -s format "$( [ "$out_ext" = jpg ] && echo jpeg || echo "$out_ext")" \
+          "$src" --out "$output" >/dev/null 2>&1; then
+        echo "[wrapper] converted $src_ext to $out_ext: $output"
+      else
+        output="${output%.*}.$src_ext"
+        cp "$src" "$output"
+        echo "[wrapper] agy produced a .$src_ext image; saved as $output to keep the extension honest" >&2
+      fi
     fi
   else
     echo
@@ -457,15 +710,40 @@ cmd_help() {
 
 Slash commands
   /agy:setup                            Verify agy install + auth. Offers install if missing.
-  /agy:ask [--model A] <prompt>         One-shot prompt; returns agy's response verbatim.
-  /agy:delegate [--background] [--model A] <task>
-                                        Hand a task to the agy:runner subagent.
-  /agy:research [--background] [--model A] <topic>
-                                        Deep-research investigation via agy:runner.
-  /agy:review [focus]                   Send current `git diff` to agy for review.
+  /agy:ask [flags] <prompt>             Quick question, read-only by default (--write to allow edits).
+  /agy:delegate [flags] <task>          Background job, no time limit, may edit files.
+  /agy:research [flags] <topic>         Read-only research as a background job.
+  /agy:review [focus]                   Send current changes (incl. untracked files) to agy for a read-only review.
+  /agy:swarm [flags] <task>             Swarm (preview) as a background job: coordinator + parallel workers.
+                                        Uses much more quota.
+  /agy:status [job]                     Progress of background jobs (members and board posts for swarms).
+  /agy:stop <job>                       Stop a background job, keeping any partial answer.
   /agy:image [--name S] [--output P] <description>
                                         Generate an image via agy's built-in tool.
   /agy:help                             This help.
+
+Flags (before the prompt)
+  --model A        model alias, name or id (table below)
+  --effort E       low|medium|high|xhigh|max; with --model, picks that tier
+  --timeout D      run limit, e.g. 90s, 15m, 1h; 0 = none
+                   (ask/review default 30m; background jobs default none)
+  --resume ID      continue an earlier conversation
+  --agent NAME     run as an agent from `agy agents`
+  --read-only      block file writes and terminal commands (default for ask)
+  --write          allow them (default for delegate and swarm)
+
+Background jobs (delegate, research, swarm) run detached with no time limit.
+`watch <job>` follows one and exits when it finishes, or when nothing has
+changed for 15 minutes (it then reports a stall; the job keeps running).
+Job files live in ~/.local/state/agy-plugin/jobs and are pruned after 14 days.
+
+Set AGY_PLUGIN_REPLY_LANG (e.g. "Traditional Chinese (Taiwan)") to make the
+wrapper's built-in instructions, such as a bare /agy:review, ask for that language.
+
+Every ask/delegate/swarm call ends with "[wrapper] conversation: <id>" on
+stderr; pass --resume <id> to continue that conversation. agy-native flags
+placed after the prompt (--add-dir DIR, --sandbox, --mode plan, --json-schema)
+are forwarded as-is.
 
 Model selection (--model)
 HELP
@@ -496,11 +774,20 @@ HELP
 
 main() {
   restore_orphaned_backup 2>/dev/null || true
+  check_duration "$PRINT_TIMEOUT"
+  [[ "$MAX_DIFF_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "error: AGY_PLUGIN_MAX_DIFF_BYTES must be a positive integer" >&2; exit 64; }
 
   case "${1:-}" in
     check)              cmd_check ;;
     ask)     shift;     cmd_ask "$@" ;;
     review)  shift;     cmd_review "$@" ;;
+    swarm)   shift;     AGY_JOB=1 AGY_SWARM=1 cmd_ask "$@" ;;
+    start)   shift;     AGY_JOB=1 cmd_ask "$@" ;;
+    watch|status|stop|result)
+      require_python
+      local sub="$1"; shift
+      python3 -I "$SCRIPT_DIR/agy-jobs.py" "$sub" "$JOBS_DIR" "$@" ;;
+    jobs)               require_python; python3 -I "$SCRIPT_DIR/agy-jobs.py" status "$JOBS_DIR" ;;
     image)   shift;     cmd_image "$@" ;;
     help|-h|--help|"")  cmd_help ;;
     *)                  echo "error: unknown subcommand '$1'" >&2; cmd_help >&2; exit 64 ;;

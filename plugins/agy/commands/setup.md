@@ -24,7 +24,9 @@ Then interpret the JSON output:
 - If `installed: true` but `auth: missing`, tell the user to either:
   - run `!agy` once interactively to complete OAuth (cached in the system
     keyring), **or**
-  - export `ANTIGRAVITY_API_KEY` in their shell rc and reload it.
+  - set `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`
+    and export `GEMINI_API_KEY`, or use Google Cloud credentials with
+    `AGY_ADC_AUTH=true`.
 
-- If `installed: true` and `auth` is `api-key` or `oauth`, report that
+- If `installed: true` and `auth` is `api-key`, `adc` or `oauth`, report that
   everything is ready — one short status line is enough.

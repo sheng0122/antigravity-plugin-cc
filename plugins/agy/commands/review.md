@@ -27,6 +27,9 @@ shell argument. If the user provided no focus text, omit the argument:
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/agy-run.sh" review
 ```
 
+The wrapper includes untracked files, runs agy read-only (it cannot edit
+files or run commands), and truncates diffs over ~100 KB with a notice.
+
 Return Antigravity's response verbatim. If there is no diff, the wrapper will
 report it — relay that to the user and suggest they stage or make changes
 first.

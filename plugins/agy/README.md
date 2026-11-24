@@ -1,22 +1,14 @@
 # agy (Claude Code plugin payload)
 
-This directory is the actual Claude Code plugin. For install instructions and
-full usage, see the [repo-level README](../../README.md).
+This directory is the Claude Code plugin. For install and usage, see the
+[repo-level README](../../README.md).
 
 ## Layout
 
-- `commands/` — slash commands: `/agy:setup`, `/agy:ask`, `/agy:delegate`,
-  `/agy:research`, `/agy:review`, `/agy:image`, `/agy:help`.
-- `agents/runner.md` — the `agy:runner` subagent (thin forwarder around the
-  Antigravity CLI).
-- `skills/antigravity-cli/` — internal runtime skill, used only inside the
-  `agy:runner` subagent.
-- `scripts/agy-run.sh` — bash wrapper that locates `agy`, checks auth, and
-  invokes `agy -p`.
-
-## Why this layout
-
-Mirrors the conventions used by
-[`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc), trimmed
-down: no Node runtime, no broker, no review-gate hook. Plain Bash plus a
-single subagent.
+- `commands/` — slash commands: `setup`, `ask`, `delegate`, `research`,
+  `swarm`, `status`, `stop`, `review`, `image`, `help`.
+- `agents/runner.md` — the `agy:runner` subagent (forwarder around `agy`).
+- `skills/antigravity-cli/` — internal runtime notes for the subagent.
+- `scripts/agy-run.sh` — wrapper: finds `agy`, checks auth, resolves models,
+  validates flags, runs `agy -p` and checks its JSON status.
+- `scripts/agy-jobs.py` — background jobs: start, watch, status, stop, result.

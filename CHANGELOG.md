@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-11-24
+
+### Added
+- Background jobs with no fixed time limit: `/agy:delegate`, `/agy:research` and
+  `/agy:swarm` start a detached agy run and `watch` follows it, printing progress
+  and exiting when it finishes or stalls (no activity for 15m; the job keeps
+  running). `/agy:status` and `/agy:stop` (interrupt first, partial answer kept).
+- Swarm monitoring reads the member list and message board, and counts any
+  member's activity as progress.
+- Warning when agy skipped actions it could not get approval for (`denied_actions`).
+
+### Changed
+- `/agy:ask` is read-only by default; `--write` allows edits.
+- `AGY_PLUGIN_REPLY_LANG` sets the language of the wrapper's built-in instructions
+  (e.g. a bare `/agy:review`); unset, agy follows the request's language.
+- The `agy:runner` forwarder runs on Haiku.
+- `/agy:image --output` converts to the requested format (macOS `sips`) or keeps
+  the real extension.
+
+## [0.9.1] - 2026-11-24
+
+Fork of simplybychris/antigravity-plugin-cc, tested against agy 1.5.16.
+
+### Added
+- `/agy:swarm` (agy swarm preview: coordinator plus parallel workers).
+- `--effort`, `--resume <id>`, `--agent`, `--timeout`, `--read-only` on ask/delegate/research.
+- Aliases `hydrogen`, `neon`, `carbon`, `argon`, `orchestrator`.
+- Every call prints its conversation id; non-`SUCCESS` statuses fail loudly.
+
+### Changed
+- `pro` now means Gemini 4 Hydrogen; `opus`/`sonnet` pick the High tier.
+- `--model` alias plus `--effort` switches to the matching tier instead of conflicting.
+- Runs are capped at 30m by default (`AGY_PLUGIN_TIMEOUT`); agy's exit code is kept.
+- `/agy:review` and `/agy:research` run read-only (deny rules for writes and commands,
+  since print mode defaults to `auto` and edits files).
+- Review includes untracked files (non-ASCII names too), works without commits,
+  lists all changed files, caps each untracked file, the file count (200) and
+  the total size (~100 KB) to stay under argv limits.
+
+### Fixed
+- Review hung for minutes on large multibyte diffs.
+- `/agy:image` exited silently when agy's reply had no image path.
+- Auth detection now recognises `GEMINI_API_KEY` and `AGY_ADC_AUTH`.
+
 ## [0.5.0] - 2026-11-06
 
 Model aliases no longer go stale when Google rotates model versions

@@ -1,21 +1,21 @@
 {
   "name": "antigravity-cc",
   "owner": {
-    "name": "simplybychris",
-    "url": "https://github.com/simplybychris"
+    "name": "sheng0122",
+    "url": "https://github.com/sheng0122"
   },
   "metadata": {
-    "description": "Antigravity CLI integration for Claude Code — delegate tasks to Google's `agy` from inside your editor.",
-    "version": "0.5.0"
+    "description": "Antigravity CLI (agy) for Claude Code: ask, delegate, research, review, image, and monitored background jobs including swarms.",
+    "version": "0.10.0"
   },
   "plugins": [
     {
       "name": "agy",
-      "description": "Use the Google Antigravity CLI (`agy`) from Claude Code — slash commands /agy:setup, /agy:ask, /agy:delegate, /agy:research, /agy:review, /agy:image, /agy:help. Supports per-call model selection via --model.",
-      "version": "0.5.0",
+      "description": "Use the Google Antigravity CLI (agy) from Claude Code: /agy:ask, /agy:delegate, /agy:research, /agy:swarm, /agy:status, /agy:stop, /agy:review, /agy:image. Background jobs have no fixed time limit and are monitored for progress and stalls.",
+      "version": "0.10.0",
       "author": {
-        "name": "simplybychris",
-        "url": "https://detechtive.pl"
+        "name": "sheng0122",
+        "url": "https://github.com/sheng0122"
       },
       "source": "./plugins/agy"
     }

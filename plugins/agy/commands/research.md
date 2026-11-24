@@ -1,57 +1,78 @@
 ---
-description: Delegate a thorough research investigation to the agy:runner subagent
-argument-hint: "[--background] [--model <alias>] <topic or question>"
-allowed-tools: Agent
+description: Run a read-only deep-research investigation through agy as a monitored background job
+argument-hint: "[--model <alias>] [--effort <level>] <topic or question>"
+allowed-tools: Bash(bash:*)
 ---
 
-Hand a deep-research task to the `agy:runner` subagent
-(`subagent_type: "agy:runner"`).
+Research the user's topic with `agy`, read-only (it can read and search but
+cannot write files or run terminal commands), as a background job.
 
-Wrap the user's topic in a research-oriented preamble so `agy` treats it as
-a structured investigation rather than a quick Q&A.
+The user's topic (opaque text):
 
-Raw user request:
+```
 $ARGUMENTS
+```
 
-## How to forward
-
-Build the research prompt for the subagent as:
+Build the prompt as:
 
 ```
 Conduct a thorough research investigation on the following topic. Look up
 authoritative sources, summarize the current state of knowledge, surface
 disagreements or open questions, and structure the response with clear
-sections (Background, Key findings, Caveats, Sources).
+sections (Background, Key findings, Caveats, Sources). Write the answer in
+the language the user wrote the topic in.
 
-Topic: <stripped user request here>
+Topic: <the user's topic, with routing flags removed>
 ```
 
-(Strip any routing flags — `--background`, `--model <alias>` — from the
-topic text before injecting it.)
+and always pass `--read-only`.
 
-Then invoke the `agy:runner` subagent with that prompt as
-`subagent_type: "agy:runner"`.
+## Run it as a monitored background job (no fixed time limit)
 
-## Routing rules
+1. Start the job with the `Bash` tool (returns immediately):
+   ```
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/agy-run.sh" start --read-only [flags] "<text>"
+   ```
+   Note the job id from the `[wrapper] job started: <id>` line and tell the
+   user in one line that it is running and how to check it (`/agy:status <id>`).
+2. Follow it with the `Bash` tool **with `run_in_background: true`**:
+   ```
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/agy-run.sh" watch <id>
+   ```
+   It prints a progress line whenever something changes and exits by itself.
+   Do not poll; you are notified when it exits. Then read its output:
+   - exit `0` — finished: give the user agy's answer verbatim, plus the
+     `[wrapper] conversation: <id>` line and any `WARNING` about blocked actions.
+   - exit `2` — stalled: no activity for 15 minutes, but the job is still
+     running. Show the user `status <id>` output and ask whether to keep
+     waiting (run `watch <id>` again in the background) or stop it
+     (`stop <id>`). Never stop a job without the user's go-ahead.
+   - exit `1` — failed or died: relay the error lines verbatim.
+3. If the user asks for progress meanwhile, run `status <id>` and summarise it.
 
-- If the request contains `--background`, launch the subagent with
-  `run_in_background: true`. Research is often long-running — prefer
-  background unless the user explicitly asked for foreground.
-- If the request contains `--model <alias>`, forward it to the subagent so
-  it can be appended to the wrapper call as `--model <alias>` (placed
-  **before** the prompt argument). If no model is given, leave the choice to
-  whatever the TUI is currently set to (a reasoning-strong model like
-  `pro` or `opus` works well for research).
+`watch` accepts `--stall <dur>` (default `15m`) and `--interval <dur>`
+(default `20s`) after the id.
 
-Aliases: `flash-low`, `flash-medium`, `flash`, `pro-low`, `pro`, `sonnet`,
-`opus`, `gpt-oss`. Each alias resolves at call time to the newest matching
-model listed by `agy models`. Any model name or id from that list (e.g.
-`"Gemini 3.8 Flash (High)"`) is also accepted. Run `/agy:help` for the
-current table.
+## Flags (place them **before** the prompt; lift them out of the user's text)
 
-## Response style
+- `--model <alias|name|id>` — aliases: `flash-low`, `flash-medium`, `flash`,
+  `pro-low`, `pro` (= Gemini Hydrogen), `neon`, `carbon`, `argon`,
+  `orchestrator`, `sonnet`, `opus`, `gpt-oss`. `/agy:help` shows the table.
+- `--effort <low|medium|high|xhigh|max>` — with `--model`, picks that tier of
+  the model (e.g. `--model opus --effort low` → Claude Opus (Low)).
+- `--resume <conversation-id>` — continue an earlier agy conversation.
+- `--agent <name>` — run as an agent listed by `agy agents`.
+- `--timeout <dur>` — e.g. `90s`, `15m`, `1h`; `0` = no limit.
+- `--read-only` / `--write` — block, or allow, file writes and terminal commands.
 
-Return the subagent's output verbatim — no extra commentary before or
-after.
+agy-native flags may follow the prompt and are forwarded as-is (`--add-dir
+<dir>`, `--sandbox`, `--json-schema '<schema>'`).
+
+Pass the user's text as **one** shell-safe argument (quote it so `"`, `$`,
+`;`, backticks and newlines cannot break out); never splice it into the
+command.
+
+If the wrapper reports `agy is not installed` or `not authenticated`, stop and
+tell the user to run `/agy:setup`.
 
 If the user did not supply a topic, ask what they want researched.

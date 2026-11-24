@@ -1,9 +1,11 @@
 {
   "name": "agy",
-  "version": "0.5.0",
-  "description": "Use the Google Antigravity CLI (`agy`) from inside Claude Code — slash commands /agy:setup, /agy:ask, /agy:delegate, /agy:research, /agy:review, /agy:image, /agy:help. Supports per-call model selection via --model.",
+  "version": "0.10.0",
+  "description": "Use the Google Antigravity CLI (agy) from Claude Code: /agy:ask, /agy:delegate, /agy:research, /agy:swarm, /agy:status, /agy:stop, /agy:review, /agy:image. Background jobs have no fixed time limit and are monitored for progress and stalls.",
   "author": {
-    "name": "simplybychris",
-    "url": "https://detechtive.pl"
-  }
+    "name": "sheng0122",
+    "url": "https://github.com/sheng0122"
+  },
+  "homepage": "https://github.com/sheng0122/antigravity-plugin-cc",
+  "license": "MIT"
 }

@@ -13,3 +13,5 @@ articles/
 .antigravitycli/
 .playwright-cli/
 .notes/
+__pycache__/
+*.pyc

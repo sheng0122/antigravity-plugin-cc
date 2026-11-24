@@ -1,212 +1,132 @@
 # agy — Antigravity CLI plugin for Claude Code
 
 Use Google's [Antigravity CLI (`agy`)](https://antigravity.google/) from
-inside Claude Code. Delegate tasks to the `agy:runner` subagent, run quick
-prompts, or get a second-opinion code review — without leaving your editor.
+inside Claude Code: quick questions, delegated tasks, research, code review,
+image generation, and **swarms** (a coordinator plus parallel workers) — with
+long runs monitored in the background instead of cut off by a timeout.
 
-This plugin is for Claude Code users who already use (or want to start using)
-Antigravity and want a smooth way to call it from the workflow they already
-have. Intentionally small: no Node runtime, no broker, no review-gate hook —
-just Bash and `agy`.
+> Fork of [`simplybychris/antigravity-plugin-cc`](https://github.com/simplybychris/antigravity-plugin-cc)
+> (MIT), extended and tested against `agy` 1.5.16. See
+> [What changed from upstream](#what-changed-from-upstream).
 
 ## What you get
 
-- **`/agy:setup`** — verify `agy` is installed and authenticated; can install
-  it for you if it is missing.
-- **`/agy:ask [--model <alias>] <prompt>`** — one-shot prompt through `agy -p`;
-  returns the raw response.
-- **`/agy:delegate [--background] [--model <alias>] <task>`** — hand a task
-  to the `agy:runner` subagent. `--background` for long jobs.
-- **`/agy:research [--background] [--model <alias>] <topic>`** — delegate a
-  deep-research investigation; wraps the topic in a structured prompt and
-  routes through `agy:runner`.
-- **`/agy:image <description>`** — generate an image with `agy`'s built-in
-  `generate_image` tool (Imagen under the hood). Optional `--name` and
-  `--output`.
-- **`/agy:review [focus]`** — ask Antigravity to review your current
-  `git diff`.
-- **`/agy:help`** — show all commands, supported `--model` aliases, and
-  the models your `agy` currently offers.
-- **`agy:runner` subagent** — thin forwarding wrapper around the Antigravity
-  CLI; available as `subagent_type: "agy:runner"` for programmatic
-  delegation.
+| Command | What it does |
+|---|---|
+| `/agy:ask [flags] <prompt>` | Quick question. **Read-only by default** (`--write` to allow edits). |
+| `/agy:delegate [flags] <task>` | Background job with no time limit; agy may edit files. |
+| `/agy:research [flags] <topic>` | Read-only research as a background job. |
+| `/agy:swarm [flags] <task>` | agy swarm (preview) as a background job: coordinator + parallel workers. |
+| `/agy:status [job]` · `/agy:stop <job>` | Progress of background jobs; stop one (partial answer kept). |
+| `/agy:review [focus]` | Read-only review of your uncommitted changes, untracked files included. |
+| `/agy:image [--name S] [--output P] <description>` | Image via agy's built-in `generate_image`. |
+| `/agy:setup` · `/agy:help` | Check install and auth; list flags, aliases and your models. |
+
+Claude can also use it on its own: the `agy:runner` subagent forwards tasks
+to agy when you say things like "ask agy to review this".
 
 ## Requirements
 
-- **Claude Code** with plugin-marketplace support
-  (`/plugin marketplace add …`).
-- **Antigravity CLI (`agy`)** installed locally. `/agy:setup` can install it
-  on first run. `--model` needs `agy` 1.2.0 or newer.
-- **Auth** for `agy`: either OAuth cached in the system keyring (after one
-  interactive run of `agy`) or `ANTIGRAVITY_API_KEY` exported in your shell.
-- **Bash** and **git** in `PATH`. macOS, Linux, or WSL.
+- Claude Code with plugin support.
+- `agy` 1.2.0+ (1.5.x recommended), signed in once interactively. `/agy:setup`
+  can install it.
+- Bash, git and python3 (python3 for JSON parsing and background jobs).
+  macOS, Linux or WSL.
 
 ## Install
 
-In Claude Code, run these three slash commands in order:
-
 ```text
-/plugin marketplace add simplybychris/antigravity-plugin-cc
+/plugin marketplace add sheng0122/antigravity-plugin-cc
 /plugin install agy@antigravity-cc
 /reload-plugins
-```
-
-Then verify everything is wired up:
-
-```text
 /agy:setup
 ```
 
-If `agy` is missing, `/agy:setup` offers to install it via the official
-installer:
+Both this fork and upstream name their marketplace `antigravity-cc`; remove
+the upstream one first (`/plugin marketplace remove antigravity-cc`) if you
+have it.
 
-```bash
-curl -fsSL https://antigravity.google/cli/install.sh | bash
-```
+## Flags
 
-If `agy` is installed but not logged in, run `agy` once interactively in your
-terminal to complete OAuth — or export `ANTIGRAVITY_API_KEY`.
+Place them before the prompt. agy-native flags (`--add-dir`, `--sandbox`,
+`--json-schema '<schema>'`) can follow the prompt and are passed through.
 
-## Usage
+| Flag | Meaning |
+|---|---|
+| `--model A` | Alias, display name or id from `agy models` (see below). |
+| `--effort E` | `low`·`medium`·`high`·`xhigh`·`max`. With `--model`, switches to that tier of the model (`--model opus --effort low` → Claude Opus (Low)). |
+| `--resume ID` | Continue an earlier conversation. Every run prints its id. |
+| `--agent NAME` | Run as an agent from `agy agents`. |
+| `--timeout D` | `90s`, `15m`, `1h`; `0` = none. Default 30m for ask/review, none for jobs. |
+| `--read-only` / `--write` | Block / allow file writes and terminal commands. |
 
-### Ask a quick question
+**Model aliases** resolve at call time against `agy models`, picking the newest
+version: `flash`, `flash-medium`, `flash-low`, `pro` (= Gemini Hydrogen),
+`pro-low`, `neon`, `carbon`, `argon`, `orchestrator`, `opus`, `sonnet`
+(High tier), `gpt-oss`. `/agy:help` shows what each one maps to on your account.
 
-```text
-/agy:ask explain the difference between Go channels and Rust async in one paragraph
-```
+**agy skills**: start the prompt with `/<skill-name>`, e.g.
+`/agy:ask /my-skill do the thing`. `/agy:ask /skills` lists the skills agy sees.
 
-Returns Antigravity's response verbatim.
+## Background jobs and swarms
 
-### Delegate a task to the `agy:runner` subagent
+`delegate`, `research` and `swarm` start a detached `agy` run and return at
+once. Claude then follows it with `watch`, which:
 
-```text
-/agy:delegate refactor the SQL queries in src/db/queries.go to use prepared statements
-```
+- prints a progress line whenever something changes (steps, latest tool or
+  text; for swarms the members and the latest message-board post);
+- exits when the job finishes, and Claude relays the answer;
+- exits with a **stall** notice after 15 minutes without any activity — the
+  job keeps running and Claude asks you whether to keep waiting or stop it.
+  For swarms, activity of any member counts, so a coordinator quietly waiting
+  on its workers is not a stall.
 
-For long tasks, run in the background and let Claude Code notify you when it
-finishes:
+There is no fixed time limit. `/agy:status` shows progress at any time;
+`/agy:stop` interrupts agy so it finishes cleanly with a partial answer.
+Job files live in `~/.local/state/agy-plugin/jobs` and are pruned after 14 days.
 
-```text
-/agy:delegate --background investigate why integration tests are flaky in CI
-```
+## Safety defaults
 
-You can also delegate by talking to Claude:
+Since agy 1.5.7, print mode (`agy -p`) defaults to `auto` mode, which **edits
+workspace files without asking**. So:
 
-```text
-Ask agy to look at this file and suggest a simpler design.
-```
-
-The plugin's selection rules route through the `agy:runner` subagent
-automatically.
-
-### Review the current diff
-
-Stage or make some changes, then:
-
-```text
-/agy:review
-/agy:review focus on error handling and concurrency safety
-```
-
-### Pick a specific model
-
-```text
-/agy:delegate --model sonnet fix the off-by-one in pagination
-/agy:delegate --model pro write a high-coverage test for the cache layer
-/agy:ask --model opus "explain Go's escape analysis"
-```
-
-Supported aliases: `flash-low`, `flash-medium`, `flash`, `pro-low`, `pro`,
-`sonnet`, `opus`, `gpt-oss`. Each alias resolves at call time to the newest
-matching model listed by `agy models`, so new Gemini or Claude versions are
-picked up without a plugin update. Any model name or id from `agy models`
-(e.g. `"Gemini 3.8 Flash (High)"`) is also accepted. Run `/agy:help` to see
-what each alias resolves to on your account. The model list depends on the
-account: if a family is missing (some accounts have no Gemini Pro model),
-its alias exits with an error and the list of models you can use.
-
-If no `--model` is given, `agy` uses whatever the TUI is currently set to,
-stored in `~/.gemini/antigravity-cli/settings.json`. Project-local
-`AGENTS.md` and `GEMINI.md` files are read directly by `agy` and unaffected
-by this plugin.
-
-### Delegate a deep research investigation
-
-```text
-/agy:research what's the current state of WebGPU support across browsers in 2026?
-/agy:research --background --model opus survey post-quantum signature schemes used in TLS
-```
-
-The command wraps your topic in a research-oriented preamble (background,
-key findings, caveats, sources) and delegates to `agy:runner`. Long
-investigations work well in `--background`.
-
-### Generate an image
-
-```text
-/agy:image a minimalist dark-mode login mockup, blue accent color
-/agy:image --name hero --output ./assets/hero.png isometric illustration of a developer at a desk
-```
-
-Triggers `agy`'s built-in `generate_image` tool. The image is written to
-the Antigravity artifacts dir (e.g.
-`~/.gemini/antigravity-cli/brain/<uuid>/<name>.png`). Pass `--output` if
-you want the wrapper to copy it next to your project.
-
-## How it works
-
-Under the hood, the plugin is a thin wrapper around your local `agy` install:
-
-```
-Claude Code  →  /agy:*  →  agy:runner subagent  →  agy-run.sh  →  agy -p "..."
-```
-
-- The plugin does **not** ship its own Antigravity runtime — it uses your
-  local `agy` binary, your local auth, and your local config.
-- The wrapper script
-  ([`plugins/agy/scripts/agy-run.sh`](./plugins/agy/scripts/agy-run.sh))
-  handles binary discovery, auth detection, and exit codes.
-- The `agy:runner` subagent is a *forwarder*: it invokes the wrapper exactly
-  once per request and returns Antigravity's output verbatim. No
-  reinterpretation.
+- `ask`, `review` and `research` are read-only: deny rules block file writes
+  and terminal commands (blocking writes alone is not enough — agy falls back
+  to shell commands).
+- `delegate` and `swarm` may edit files; pass `--read-only` to prevent it.
+- Actions agy wanted but could not get approval for are reported as a
+  `WARNING`, instead of silently looking like success.
 
 ## Configuration
 
-`agy` stores its preferences (selected model, theme, telemetry, trusted
-workspaces) in `~/.gemini/antigravity-cli/settings.json`. Project-local
-`AGENTS.md` / `GEMINI.md` files are read directly by `agy`. This plugin
-doesn't override or shadow any of that — drop config files where `agy`
-expects them and they'll be picked up.
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGY_PLUGIN_REPLY_LANG` | unset | Language for the plugin's built-in instructions, e.g. `Traditional Chinese (Taiwan)`. Unset: agy follows your request's language. |
+| `AGY_PLUGIN_TIMEOUT` | `30m` | Default limit for ask/review. |
+| `AGY_PLUGIN_MAX_DIFF_BYTES` | `100000` | Review size cap (stays under Linux's 128 KiB per-argument limit). |
+| `AGY_PLUGIN_JOBS_DIR` | `~/.local/state/agy-plugin/jobs` | Where background jobs are kept. |
 
-The `--model <alias>` flag on `/agy:ask`, `/agy:delegate`, and `/agy:research`
-is passed to `agy`'s own `--model` flag for that call only, so the TUI's
-selected model stays as it is. This needs `agy` 1.2.0 or newer; run
-`agy update` if the wrapper reports that your `agy` is too old.
+To set one for Claude Code, add it under `"env"` in `~/.claude/settings.json`.
 
-## FAQ
+## What changed from upstream
 
-### Do I need an Antigravity subscription?
+- **Background jobs** for delegate/research/swarm with live monitoring and
+  stall detection instead of a fixed timeout; `/agy:swarm`, `/agy:status`,
+  `/agy:stop`.
+- **Model aliases fixed** for Gemini 4 (no "Pro" line any more) and
+  tiered Claude models (they used to pick the Low tier); `--effort` with an
+  alias picks the matching tier instead of being rejected by agy.
+- **Read-only by default** where it matters (see Safety defaults).
+- **Review**: untracked files with non-ASCII names, repos without commits,
+  per-file and total size caps, a list of all changed files, and a 200-file cap.
+  Fixed a multi-minute hang on large multibyte diffs.
+- New flags `--effort`, `--resume`, `--agent`, `--timeout`, `--read-only`,
+  `--write`; JSON status checking; blocked-action warnings.
+- `/agy:image`: no longer exits silently when no image path is found; converts
+  to the requested `--output` format.
+- Auth detection for `GEMINI_API_KEY` and `AGY_ADC_AUTH`.
 
-You need whatever account `agy` accepts: Google AI Pro, Ultra, Code Assist
-Standard/Enterprise, or an enterprise GCP project. See the
-[Antigravity docs](https://antigravity.google/docs/cli-overview) for details.
-
-### Does this plugin send data anywhere other than what `agy` sends?
-
-No. The plugin runs `agy` locally over a Bash wrapper. The wrapper only reads
-filesystem paths and your shell environment. Your prompts go directly to
-Google through `agy`'s normal channels.
-
-### Can I keep using Antigravity outside this plugin?
-
-Yes — the plugin uses your local install. Running `agy` directly in a
-terminal keeps working exactly as before.
-
-### Why a subagent instead of just a slash command?
-
-Subagents in Claude Code can run in the background and report back when
-finished. That is the workflow you want when you "hand this off to another
-model and keep working" — which is the whole point of delegating to `agy`.
+Full history: [CHANGELOG.md](./CHANGELOG.md).
 
 ## Development
 
@@ -214,15 +134,11 @@ model and keep working" — which is the whole point of delegating to `agy`.
 bash tests/agy-run.test.sh
 ```
 
-The tests run the wrapper against a stub `agy` binary in a temporary `HOME`,
-so they never touch your real install or settings.
-
-## Inspiration
-
-Inspired by
-[`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc), which
-does the same thing for Codex. This plugin is intentionally smaller.
+80 tests run the wrapper against a stub `agy` in a temporary `HOME`, covering
+alias resolution, flag validation, prompt quoting, JSON handling, review edge
+cases and background jobs (start, watch, stall, stop, swarm activity). They
+never touch your real install.
 
 ## License
 
-[MIT](./LICENSE).
+[MIT](./LICENSE). Original work © simplybychris; modifications © sheng0122.
